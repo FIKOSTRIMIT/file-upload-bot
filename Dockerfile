@@ -15,8 +15,8 @@ RUN npm ci --only=production
 COPY server.js ./
 COPY public ./public
 
-# Create uploads directory
-RUN mkdir -p uploads
+# Create uploads directory with correct permissions
+RUN mkdir -p uploads && chown -R node:node uploads
 
 # Non-root user
 USER node
