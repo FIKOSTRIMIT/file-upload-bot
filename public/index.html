@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#2563eb">
+  <title>Private Upload</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0f172a; --card: #1e293b; --border: #334155;
+      --primary: #2563eb; --primary-hover: #1d4ed8;
+      --text: #f1f5f9; --muted: #94a3b8; --success: #22c55e; --error: #ef4444;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0;
+        --primary: #2563eb; --primary-hover: #1d4ed8;
+        --text: #0f172a; --muted: #64748b; --success: #16a34a; --error: #dc2626;
+      }
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      padding: 20px; line-height: 1.6;
+    }
+    .container { width: 100%; max-width: 480px; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 16px; padding: 32px; box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+    }
+    h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 8px; text-align: center; }
+    .subtitle { color: var(--muted); text-align: center; margin-bottom: 24px; font-size: 0.9rem; }
+    
+    .drop-zone {
+      border: 2px dashed var(--border); border-radius: 12px;
+      padding: 40px 20px; text-align: center; cursor: pointer;
+      transition: all 0.2s ease; background: rgba(37,99,235,0.05);
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--primary); background: rgba(37,99,235,0.1);
+    }
+    .drop-zone-icon { width: 48px; height: 48px; margin: 0 auto 16px; color: var(--muted); }
+    .drop-zone.drag-over .drop-zone-icon { color: var(--primary); }
+    .drop-zone-text { color: var(--muted); font-size: 0.95rem; }
+    .drop-zone-text strong { color: var(--text); }
+    
+    .file-input { display: none; }
+    
+    .preview { display: none; margin-top: 20px; }
+    .preview.show { display: block; }
+    .preview-thumb {
+      width: 100%; max-height: 200px; object-fit: cover; border-radius: 8px;
+      background: var(--bg); border: 1px solid var(--border);
+    }
+    .preview-video { width: 100%; max-height: 200px; border-radius: 8px; background: var(--bg); }
+    .preview-info { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
+    .preview-name { font-size: 0.85rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 70%; }
+    .preview-size { font-size: 0.8rem; color: var(--muted); }
+    .preview-actions { display: flex; gap: 8px; margin-top: 12px; }
+    
+    .btn {
+      padding: 14px 24px; border-radius: 10px; font-size: 1rem; font-weight: 600;
+      border: none; cursor: pointer; transition: all 0.2s ease; display: inline-flex;
+      align-items: center; justify-content: center; gap: 8px; width: 100%;
+    }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-secondary { background: var(--border); color: var(--text); }
+    .btn-secondary:hover { background: #475569; }
+    
+    .progress-container { display: none; margin-top: 16px; }
+    .progress-container.show { display: block; }
+    .progress-bar {
+      height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; background: var(--primary); width: 0%; transition: width 0.3s ease;
+    }
+    .progress-text { font-size: 0.85rem; color: var(--muted); margin-top: 8px; text-align: center; }
+    
+    .status { display: none; margin-top: 16px; padding: 12px 16px; border-radius: 8px; font-size: 0.9rem; }
+    .status.show { display: block; }
+    .status.success { background: rgba(34,197,94,0.15); border: 1px solid var(--success); color: var(--success); }
+    .status.error { background: rgba(239,68,68,0.15); border: 1px solid var(--error); color: var(--error); }
+    
+    .footer { text-align: center; margin-top: 24px; color: var(--muted); font-size: 0.8rem; }
+    .spinner {
+      width: 20px; height: 20px; border: 2px solid transparent;
+      border-top-color: currentColor; border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>📤 Private Upload</h1>
+      <p class="subtitle">Фото и видео уйдут прямо в Telegram</p>
+      
+      <div class="drop-zone" id="dropZone">
+        <svg class="drop-zone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+        </svg>
+        <p class="drop-ze-text">
+          Перетащите файл сюда или <strong>нажмите для выбора</strong>
+        </p>
+        <p style="font-size: 0.75rem; color: var(--muted); margin-top: 8px;">
+          Фото (JPG, PNG, WebP, HEIC) и видео (MP4, MOV, WebM) до 50 МБ
+        </p>
+        <input type="file" class="file-input" id="fileInput" accept="image/*,video/*">
+      </div>
+      
+      <div class="preview" id="preview">
+        <img class="preview-thumb" id="previewImg" alt="Preview">
+        <video class="preview-video hidden" id="previewVideo" controls></video>
+        <div class="preview-info">
+          <span class="preview-name" id="previewName"></span>
+          <span class="preview-size" id="previewSize"></span>
+        </div>
+        <div class="preview-actions">
+          <button class="btn btn-secondary" id="changeFileBtn" style="flex: 1;">Другой файл</button>
+        </div>
+      </div>
+      
+      <button class="btn btn-primary" id="uploadBtn" disabled>
+        <span class="btn-text">Отправить в Telegram</span>
+        <span class="spinner hidden" id="btnSpinner"></span>
+      </button>
+      
+      <div class="progress-container" id="progressContainer">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <p class="progress-text" id="progressText">Подготовка...</p>
+      </div>
+      
+      <div class="status" id="status"></div>
+      
+      <p class="footer">
+        Ваша секретная ссылка — единственный способ попасть на эту страницу.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const preview = document.getElementById('preview');
+    const previewImg = document.getElementById('previewImg');
+    const previewVideo = document.getElementById('previewVideo');
+    const previewName = document.getElementById('previewName');
+    const previewSize = document.getElementById('previewSize');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const btnText = document.querySelector('.btn-text');
+    const btnSpinner = document.getElementById('btnSpinner');
+    const progressContainer = document.getElementById('progressContainer');
+    const progressFill = document.getElementById('progressFill');
+    const progressText = document.getElementById('progressText');
+    const status = document.getElementById('status');
+    const changeFileBtn = document.getElementById('changeFileBtn');
+    
+    let selectedFile = null;
+    
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+    
+    function showPreview(file) {
+      selectedFile = file;
+      previewName.textContent = file.name;
+      previewSize.textContent = formatBytes(file.size);
+      
+      const isVideo = file.type.startsWith('video/');
+      previewImg.classList.toggle('hidden', isVideo);
+      previewVideo.classList.toggle('hidden', !isVideo);
+      
+      if (isVideo) {
+        previewVideo.src = URL.createObjectURL(file);
+      } else {
+        previewImg.src = URL.createObjectURL(file);
+      }
+      
+      preview.classList.add('show');
+      dropZone.style.display = 'none';
+      uploadBtn.disabled = false;
+    }
+    
+    function resetPreview() {
+      selectedFile = null;
+      preview.classList.remove('show');
+      dropZone.style.display = 'block';
+      uploadBtn.disabled = true;
+      progressContainer.classList.remove('show');
+      status.classList.remove('show');
+      progressFill.style.width = '0%';
+      if (previewImg.src) URL.revokeObjectURL(previewImg.src);
+      if (previewVideo.src) URL.revokeObjectURL(previewVideo.src);
+    }
+    
+    function setUploading(uploading) {
+      uploadBtn.disabled = uploading;
+      btnText.textContent = uploading ? 'Отправка...' : 'Отправить в Telegram';
+      btnSpinner.classList.toggle('hidden', !uploading);
+    }
+    
+    function showStatus(message, type) {
+      status.textContent = message;
+      status.className = 'status show ' + type;
+    }
+    
+    // Drag & drop
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+      dropZone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); }, false);
+    });
+    ['dragenter', 'dragover'].forEach(evt => {
+      dropZone.addEventListener(evt, () => dropZone.classList.add('drag-over'), false);
+    });
+    ['dragleave', 'drop'].forEach(evt => {
+      dropZone.addEventListener(evt, () => dropZone.classList.remove('drag-over'), false);
+    });
+    
+    dropZone.addEventListener('drop', e => {
+      const file = e.dataTransfer.files[0];
+      if (file) showPreview(file);
+    });
+    
+    dropZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', e => {
+      if (e.target.files[0]) showPreview(e.target.files[0]);
+    });
+    
+    changeFileBtn.addEventListener('click', resetPreview);
+    
+    uploadBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      
+      setUploading(true);
+      progressContainer.classList.add('show');
+      status.classList.remove('show');
+      
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      
+      try {
+        const response = await fetch(window.location.pathname + '/upload', {
+          method: 'POST',
+          body: formData,
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok && data.success) {
+          progressFill.style.width = '100%';
+          progressText.textContent = 'Готово!';
+          showStatus('✅ Файл успешно отправлен в Telegram!', 'success');
+          setTimeout(resetPreview, 2000);
+        } else {
+          throw new Error(data.error || 'Ошибка сервера');
+        }
+      } catch (err) {
+        showStatus('❌ ' + err.message, 'error');
+      } finally {
+        setUploading(false);
+      }
+    });
+    
+    // Paste support
+    document.addEventListener('paste', e => {
+      const items = e.clipboardData.items;
+      for (const item of items) {
+        if (item.type.startsWith('image/') || item.type.startsWith('video/')) {
+          const file = item.getAsFile();
+          if (file) showPreview(file);
+          break;
+        }
+      }
+    });
+  </script>
+</body>
+</html>
