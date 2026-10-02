@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 3000;
 const SECRET_PATH = process.env.SECRET_PATH || 'upload-' + Math.random().toString(36).substring(7);
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
-const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 50 * 1024 * 1024; // 50MB default
+const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 500 * 1024 * 1024; // 500MB default
 
 if (!BOT_TOKEN || !CHAT_ID) {
   console.error('❌ BOT_TOKEN and CHAT_ID must be set in .env');
