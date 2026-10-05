@@ -94,6 +94,8 @@ app.get('/health', (req, res) => {
 
 // Handle file upload
 app.post(`/${SECRET_PATH}/upload`, upload.single('file'), async (req, res) => {
+  const startTime = Date.now();
+  
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -101,13 +103,27 @@ app.post(`/${SECRET_PATH}/upload`, upload.single('file'), async (req, res) => {
 
     const { path: filePath, originalname, mimetype, size } = req.file;
     const isVideo = mimetype.startsWith('video/');
+    
+    // Strict validation: only images and videos
+    const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic', 'image/heif'];
+    const allowedVideoTypes = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', 'video/x-msvideo'];
+    const allowedTypes = [...allowedImageTypes, ...allowedVideoTypes];
+    
+    if (!allowedTypes.includes(mimetype) && !mimetype.startsWith('image/') && !mimetype.startsWith('video/')) {
+      // Clean up invalid file
+      import('fs').then(fs => fs.promises.unlink(filePath).catch(() => {}));
+      return res.status(400).json({ error: 'Only photos and videos allowed' });
+    }
+
     const caption = `📎 ${originalname}\n📦 ${formatBytes(size)}\n🕐 ${new Date().toLocaleString('ru-RU')}`;
 
-    // Send to Telegram
+    // Send to Telegram (streaming from disk)
     const result = await sendToTelegram(filePath, originalname, mimetype, isVideo, caption);
 
     // Clean up local file after sending
     import('fs').then(fs => fs.promises.unlink(filePath).catch(() => {}));
+
+    console.log(`✅ Upload completed in ${Date.now() - startTime}ms: ${originalname} (${formatBytes(size)})`);
 
     res.json({
       success: true,
@@ -116,6 +132,10 @@ app.post(`/${SECRET_PATH}/upload`, upload.single('file'), async (req, res) => {
     });
   } catch (error) {
     console.error('Upload error:', error);
+    // Cleanup on error
+    if (req.file?.path) {
+      import('fs').then(fs => fs.promises.unlink(req.file.path).catch(() => {}));
+    }
     res.status(500).json({ error: error.message || 'Failed to send to Telegram' });
   }
 });
@@ -123,7 +143,9 @@ app.post(`/${SECRET_PATH}/upload`, upload.single('file'), async (req, res) => {
 async function sendToTelegram(filePath, filename, mimetype, isVideo, caption) {
   const FormData = (await import('form-data')).default;
   const fs = await import('fs');
-  const fileBuffer = await fs.promises.readFile(filePath);
+  
+  // Stream directly from disk to avoid loading 500MB into memory
+  const fileStream = fs.createReadStream(filePath);
   
   const formData = new FormData();
   
@@ -132,18 +154,24 @@ async function sendToTelegram(filePath, filename, mimetype, isVideo, caption) {
   formData.append('parse_mode', 'HTML');
 
   if (isVideo) {
-    formData.append('video', fileBuffer, filename);
+    formData.append('video', fileStream, filename);
   } else {
-    formData.append('photo', fileBuffer, filename);
+    formData.append('photo', fileStream, filename);
   }
 
   const endpoint = isVideo ? 'sendVideo' : 'sendPhoto';
-  const timeout = isVideo ? 120000 : 60000;
+  // Longer timeout for 500MB files
+  const timeout = isVideo ? 300000 : 180000; // 5 min video, 3 min photo
   
   const response = await axios.post(
     `https://api.telegram.org/bot${BOT_TOKEN}/${endpoint}`,
     formData,
-    { headers: formData.getHeaders(), timeout }
+    { 
+      headers: formData.getHeaders(), 
+      timeout,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    }
   );
   return response.data;
 }
