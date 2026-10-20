@@ -1,8 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import axios from 'axios';
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import FormData from 'form-data';
 import { fileURLToPath } from 'url';
 import { dirname, join, extname } from 'path';
 import { existsSync, mkdirSync } from 'fs';
@@ -21,40 +20,14 @@ const PORT = process.env.PORT || 3000;
 const SECRET_PATH = process.env.SECRET_PATH || 'upload-' + Math.random().toString(36).substring(7);
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
-const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 500 * 1024 * 1024; // 500MB default
-
-// R2 Config
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
-const R2_BUCKET = process.env.R2_BUCKET;
-const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL; // optional: https://pub-xxx.r2.dev
-
-const USE_R2 = R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET;
+const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 200 * 1024 * 1024; // 200MB default (Catbox limit)
 
 if (!BOT_TOKEN || !CHAT_ID) {
   console.error('❌ BOT_TOKEN and CHAT_ID must be set in .env');
   process.exit(1);
 }
 
-if (USE_R2) {
-  console.log('☁️  R2 storage enabled');
-} else {
-  console.log('⚠️  R2 not configured, falling back to local storage + Telegram direct (50MB limit)');
-}
-
-// R2 Client
-let r2Client;
-if (USE_R2) {
-  r2Client = new S3Client({
-    region: 'auto',
-    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: R2_ACCESS_KEY_ID,
-      secretAccessKey: R2_SECRET_ACCESS_KEY,
-    },
-  });
-}
+console.log('📦 Using Catbox.moe for file storage (200MB limit, no keys needed)');
 
 // Rate limiter: 30 requests per minute per IP
 const rateLimiter = new RateLimiterMemory({
@@ -62,7 +35,7 @@ const rateLimiter = new RateLimiterMemory({
   duration: 60,
 });
 
-// Storage config (fallback for non-R2 or small files)
+// Storage config
 const uploadDir = join(__dirname, 'uploads');
 if (!existsSync(uploadDir)) {
   mkdirSync(uploadDir, { recursive: true });
@@ -96,8 +69,8 @@ app.use(helmet({
   contentSecurityPolicy: false,
 }));
 app.use(cors());
-app.use(express.json({ limit: '500mb' }));
-app.use(express.urlencoded({ extended: true, limit: '500mb' }));
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
 // Rate limiting middleware
 app.use(async (req, res, next) => {
@@ -119,68 +92,38 @@ app.get(`/${SECRET_PATH}`, (req, res) => {
 
 // Health check (no secret needed)
 app.get('/health', (req, res) => {
-  res.json({ ok: true, secretPath: SECRET_PATH, r2: USE_R2 });
+  res.json({ ok: true, secretPath: SECRET_PATH, storage: 'catbox.moe', maxFileSize: '200MB' });
 });
 
-// Get presigned URL for direct browser upload to R2
-app.post(`/${SECRET_PATH}/presign`, async (req, res) => {
-  if (!USE_R2) {
-    return res.status(400).json({ error: 'R2 not configured' });
+// Upload to Catbox.moe
+async function uploadToCatbox(filePath, originalname, mimetype) {
+  const fs = await import('fs');
+  const fileStream = fs.createReadStream(filePath);
+  
+  const formData = new FormData();
+  formData.append('reqtype', 'fileupload');
+  formData.append('file', fileStream, originalname);
+  
+  const response = await axios.post(
+    'https://catbox.moe/user/api.php',
+    formData,
+    { 
+      headers: formData.getHeaders(),
+      timeout: 300000, // 5 min for 200MB
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    }
+  );
+  
+  // Catbox returns just the URL as plain text
+  const url = response.data.trim();
+  if (!url.startsWith('https://')) {
+    throw new Error('Catbox upload failed: ' + url);
   }
+  return url;
+}
 
-  try {
-    const { filename, contentType, size } = req.body;
-    
-    if (!filename || !contentType) {
-      return res.status(400).json({ error: 'filename and contentType required' });
-    }
-
-    // Validate file type
-    const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic', 'image/heif'];
-    const allowedVideoTypes = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska', 'video/x-msvideo'];
-    const allowedTypes = [...allowedImageTypes, ...allowedVideoTypes];
-    
-    if (!allowedTypes.includes(contentType) && !contentType.startsWith('image/') && !contentType.startsWith('video/')) {
-      return res.status(400).json({ error: 'Only photos and videos allowed' });
-    }
-
-    // Validate size
-    if (size > MAX_FILE_SIZE) {
-      return res.status(400).json({ error: `File too large. Max ${formatBytes(MAX_FILE_SIZE)}` });
-    }
-
-    const key = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extname(filename)}`;
-    const command = new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: key,
-      ContentType: contentType,
-    });
-
-    const uploadUrl = await getSignedUrl(r2Client, command, { expiresIn: 3600 }); // 1 hour
-    
-    // Build public/download URL
-    let downloadUrl;
-    if (R2_PUBLIC_URL) {
-      downloadUrl = `${R2_PUBLIC_URL}/${key}`;
-    } else {
-      // Generate presigned download URL (valid 7 days)
-      const getCommand = new GetObjectCommand({ Bucket: R2_BUCKET, Key: key });
-      downloadUrl = await getSignedUrl(r2Client, getCommand, { expiresIn: 604800 });
-    }
-
-    res.json({
-      uploadUrl,
-      downloadUrl,
-      key,
-      bucket: R2_BUCKET,
-    });
-  } catch (error) {
-    console.error('Presign error:', error);
-    res.status(500).json({ error: 'Failed to generate upload URL' });
-  }
-});
-
-// Handle file upload (fallback: local -> Telegram direct for small files)
+// Handle file upload (local -> Catbox -> Telegram)
 app.post(`/${SECRET_PATH}/upload`, upload.single('file'), async (req, res) => {
   const startTime = Date.now();
   
@@ -202,48 +145,27 @@ app.post(`/${SECRET_PATH}/upload`, upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Only photos and videos allowed' });
     }
 
-    let result;
-    let downloadUrl;
-
-    if (USE_R2) {
-      // Upload to R2
-      const fs = await import('fs');
-      const fileStream = fs.createReadStream(filePath);
-      const key = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extname(originalname)}`;
-      
-      await r2Client.send(new PutObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: key,
-        Body: fileStream,
-        ContentType: mimetype,
-      }));
-
-      // Clean up local file
-      await fs.promises.unlink(filePath).catch(() => {});
-
-      // Build download URL
-      if (R2_PUBLIC_URL) {
-        downloadUrl = `${R2_PUBLIC_URL}/${key}`;
-      } else {
-        const getCommand = new GetObjectCommand({ Bucket: R2_BUCKET, Key: key });
-        downloadUrl = await getSignedUrl(r2Client, getCommand, { expiresIn: 604800 });
-      }
-
-      // Send link to Telegram
-      result = await sendLinkToTelegram(originalname, size, downloadUrl, isVideo);
-    } else {
-      // Fallback: direct to Telegram (50MB limit)
-      const caption = `📎 ${originalname}\n📦 ${formatBytes(size)}\n🕐 ${new Date().toLocaleString('ru-RU')}`;
-      result = await sendToTelegram(filePath, originalname, mimetype, isVideo, caption);
-      
+    // Check Catbox limit (200MB)
+    if (size > 200 * 1024 * 1024) {
       import('fs').then(fs => fs.promises.unlink(filePath).catch(() => {}));
+      return res.status(400).json({ error: 'File too large for Catbox. Max 200MB' });
     }
 
-    console.log(`✅ Upload completed in ${Date.now() - startTime}ms: ${originalname} (${formatBytes(size)})`);
+    // Upload to Catbox
+    console.log(`☁️  Uploading to Catbox: ${originalname} (${formatBytes(size)})`);
+    const downloadUrl = await uploadToCatbox(filePath, originalname, mimetype);
+    
+    // Clean up local file
+    import('fs').then(fs => fs.promises.unlink(filePath).catch(() => {}));
+
+    // Send link to Telegram
+    const result = await sendLinkToTelegram(originalname, size, downloadUrl, isVideo);
+
+    console.log(`✅ Upload completed in ${Date.now() - startTime}ms: ${originalname} (${formatBytes(size)}) -> ${downloadUrl}`);
 
     res.json({
       success: true,
-      message: USE_R2 ? 'File uploaded to cloud, link sent to Telegram!' : 'File sent to Telegram!',
+      message: 'File uploaded to Catbox, link sent to Telegram!',
       downloadUrl,
       telegram: result,
     });
@@ -256,50 +178,9 @@ app.post(`/${SECRET_PATH}/upload`, upload.single('file'), async (req, res) => {
   }
 });
 
-// Notify server that R2 upload is complete (from browser)
-app.post(`/${SECRET_PATH}/complete`, async (req, res) => {
-  if (!USE_R2) {
-    return res.status(400).json({ error: 'R2 not configured' });
-  }
-
-  try {
-    const { key, originalname, size, mimetype } = req.body;
-    
-    if (!key || !originalname || !size) {
-      return res.status(400).json({ error: 'key, originalname, size required' });
-    }
-
-    const isVideo = mimetype?.startsWith('video/');
-    
-    // Build download URL
-    let downloadUrl;
-    if (R2_PUBLIC_URL) {
-      downloadUrl = `${R2_PUBLIC_URL}/${key}`;
-    } else {
-      const getCommand = new GetObjectCommand({ Bucket: R2_BUCKET, Key: key });
-      downloadUrl = await getSignedUrl(r2Client, getCommand, { expiresIn: 604800 });
-    }
-
-    // Send link to Telegram
-    const result = await sendLinkToTelegram(originalname, size, downloadUrl, isVideo);
-
-    console.log(`✅ R2 upload completed: ${originalname} (${formatBytes(size)})`);
-
-    res.json({
-      success: true,
-      message: 'File uploaded to cloud, link sent to Telegram!',
-      downloadUrl,
-      telegram: result,
-    });
-  } catch (error) {
-    console.error('Complete upload error:', error);
-    res.status(500).json({ error: error.message || 'Failed to complete upload' });
-  }
-});
-
 async function sendLinkToTelegram(filename, size, downloadUrl, isVideo) {
   const emoji = isVideo ? '🎬' : '🖼️';
-  const caption = `${emoji} <b>${filename}</b>\n📦 ${formatBytes(size)}\n🔗 <a href="${downloadUrl}">Скачать файл</a>\n🕐 ${new Date().toLocaleString('ru-RU')}`;
+  const caption = `${emoji} <b>${filename}</b>\n📦 ${formatBytes(size)}\n🔗 <a href="${downloadUrl}">Скачать файл (Catbox.moe)</a>\n🕐 ${new Date().toLocaleString('ru-RU')}`;
   
   const response = await axios.post(
     `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
@@ -315,7 +196,6 @@ async function sendLinkToTelegram(filename, size, downloadUrl, isVideo) {
 }
 
 async function sendToTelegram(filePath, filename, mimetype, isVideo, caption) {
-  const FormData = (await import('form-data')).default;
   const fs = await import('fs');
   const fileStream = fs.createReadStream(filePath);
   
@@ -331,7 +211,7 @@ async function sendToTelegram(filePath, filename, mimetype, isVideo, caption) {
   }
 
   const endpoint = isVideo ? 'sendVideo' : 'sendPhoto';
-  const timeout = isVideo ? 300000 : 180000;
+  const timeout = isVideo ? 180000 : 120000;
   
   const response = await axios.post(
     `https://api.telegram.org/bot${BOT_TOKEN}/${endpoint}`,
@@ -374,7 +254,7 @@ app.listen(PORT, '0.0.0.0', () => {
 ║  ❤️  Health: http://localhost:${PORT}/health                   ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  📁 Max file size: ${formatBytes(MAX_FILE_SIZE).padEnd(18)} ║
-║  ☁️  R2 Storage: ${USE_R2 ? 'ENABLED'.padEnd(24) : 'DISABLED (fallback)'.padEnd(24)} ║
+║  ☁️  Storage: Catbox.moe (200MB, no keys)             ║
 ║  🤖 Bot: @${BOT_TOKEN.split(':')[0].padEnd(28)} ║
 ║  💬 Chat ID: ${String(CHAT_ID).padEnd(28)} ║
 ╚═══════════════════════════════════════════════════════════════╝
