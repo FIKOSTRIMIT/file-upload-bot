@@ -243,25 +243,59 @@
       setUploading(true);
       progressContainer.classList.add('show');
       status.classList.remove('show');
-      
-      const formData = new FormData();
-      formData.append('file', selectedFile);
+      progressText.textContent = 'Получение ссылки для загрузки...';
       
       try {
-        const response = await fetch(window.location.pathname + '/upload', {
+        // Step 1: Get presigned URL from server
+        const presignResponse = await fetch(window.location.pathname + '/presign', {
           method: 'POST',
-          body: formData,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: selectedFile.name,
+            contentType: selectedFile.type,
+            size: selectedFile.size,
+          }),
         });
         
-        const data = await response.json();
+        const presignData = await presignResponse.json();
         
-        if (response.ok && data.success) {
+        if (!presignResponse.ok) {
+          throw new Error(presignData.error || 'Failed to get upload URL');
+        }
+        
+        const { uploadUrl, downloadUrl, key } = presignData;
+        
+        // Step 2: Upload directly to R2 with progress
+        progressText.textContent = 'Загрузка в облако...';
+        
+        await uploadToR2(uploadUrl, selectedFile, (progress) => {
+          progressFill.style.width = progress + '%';
+          progressText.textContent = `Загрузка в облако: ${progress}%`;
+        });
+        
+        // Step 3: Notify server upload is complete
+        progressText.textContent = 'Отправка ссылки в Telegram...';
+        
+        const completeResponse = await fetch(window.location.pathname + '/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            key,
+            originalname: selectedFile.name,
+            size: selectedFile.size,
+            mimetype: selectedFile.type,
+          }),
+        });
+        
+        const completeData = await completeResponse.json();
+        
+        if (completeResponse.ok && completeData.success) {
           progressFill.style.width = '100%';
           progressText.textContent = 'Готово!';
-          showStatus('✅ Файл успешно отправлен в Telegram!', 'success');
+          showStatus('✅ Файл загружен в облако, ссылка отправлена в Telegram!', 'success');
           setTimeout(resetPreview, 2000);
         } else {
-          throw new Error(data.error || 'Ошибка сервера');
+          throw new Error(completeData.error || 'Ошибка сервера');
         }
       } catch (err) {
         showStatus('❌ ' + err.message, 'error');
@@ -269,6 +303,35 @@
         setUploading(false);
       }
     });
+    
+    // Upload file to R2 with progress tracking
+    function uploadToR2(url, file, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            onProgress(percent);
+          }
+        });
+        
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            reject(new Error(`Upload failed: ${xhr.status}`));
+          }
+        });
+        
+        xhr.addEventListener('error', () => reject(new Error('Network error during upload')));
+        xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
+        
+        xhr.open('PUT', url);
+        xhr.setRequestHeader('Content-Type', file.type);
+        xhr.send(file);
+      });
+    }
     
     // Paste support
     document.addEventListener('paste', e => {
