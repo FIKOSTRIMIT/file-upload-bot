@@ -95,32 +95,54 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, secretPath: SECRET_PATH, storage: 'catbox.moe', maxFileSize: '200MB' });
 });
 
-// Upload to Catbox.moe
-async function uploadToCatbox(filePath, originalname, mimetype) {
+// Upload to Catbox.moe (with retries: Catbox sometimes returns an empty 200 response)
+async function uploadToCatbox(filePath, originalname, mimetype, retries = 3) {
   const fs = await import('fs');
-  const fileStream = fs.createReadStream(filePath);
-  
-  const formData = new FormData();
-  formData.append('reqtype', 'fileupload');
-  formData.append('fileToUpload', fileStream, originalname);
-  
-  const response = await axios.post(
-    'https://catbox.moe/user/api.php',
-    formData,
-    { 
-      headers: formData.getHeaders(),
-      timeout: 300000, // 5 min for 200MB
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
+  const fileSize = fs.statSync(filePath).size;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const fileStream = fs.createReadStream(filePath);
+
+    const formData = new FormData();
+    formData.append('reqtype', 'fileupload');
+    formData.append('fileToUpload', fileStream, { filename: originalname, knownLength: fileSize });
+
+    try {
+      const response = await axios.post(
+        'https://catbox.moe/user/api.php',
+        formData,
+        {
+          headers: {
+            ...formData.getHeaders(),
+            'Content-Length': formData.getLengthSync(),
+            'User-Agent': 'Mozilla/5.0 (compatible; FileUploadBot/1.0)',
+          },
+          timeout: 300000, // 5 min for 200MB
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        }
+      );
+
+      // Catbox returns just the URL as plain text
+      const url = (response.data ?? '').toString().trim();
+      if (url.startsWith('https://')) {
+        return url;
+      }
+      lastError = new Error(`Catbox ответил: ${url || '(пустой ответ)'}`);
+    } catch (err) {
+      lastError = err.response?.data
+        ? new Error(`Catbox HTTP ${err.response.status}: ${String(err.response.data).slice(0, 200)}`)
+        : err;
     }
-  );
-  
-  // Catbox returns just the URL as plain text
-  const url = response.data.trim();
-  if (!url.startsWith('https://')) {
-    throw new Error('Catbox upload failed: ' + url);
+
+    if (attempt < retries) {
+      console.log(`⚠️  Catbox попытка ${attempt}/${retries} не удалась (${lastError.message}), повторяю...`);
+      await new Promise(r => setTimeout(r, 2000 * attempt));
+    }
   }
-  return url;
+
+  throw new Error(`Catbox upload failed after ${retries} попыток: ${lastError?.message || 'unknown error'}`);
 }
 
 // Handle file upload (local -> Catbox -> Telegram)
