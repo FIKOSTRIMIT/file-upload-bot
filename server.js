@@ -102,7 +102,7 @@ async function uploadToCatbox(filePath, originalname, mimetype) {
   
   const formData = new FormData();
   formData.append('reqtype', 'fileupload');
-  formData.append('file', fileStream, originalname);
+  formData.append('fileToUpload', fileStream, originalname);
   
   const response = await axios.post(
     'https://catbox.moe/user/api.php',
